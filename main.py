@@ -1,0 +1,29 @@
+import asyncio
+from aiogram import Bot, Dispatcher
+from config import BOT_TOKEN
+
+from handlers import start
+from handlers import transactions
+from handlers import categories
+
+from database.models import create_tables
+
+
+async def main():
+    # Создаём таблицы при запуске
+    create_tables()
+
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+
+    # Подключаем роутеры
+    dp.include_router(start.router)
+    dp.include_router(transactions.router)
+    dp.include_router(categories.router)
+
+    # Запускаем бота
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
