@@ -4,14 +4,14 @@ from database.db import get_connection
 
 router = Router()
 
+waiting_for_category = set()
 
-# Когда нажимают кнопку "⚙️ Категории"
+
 @router.message(F.text == "⚙️ Категории")
 async def show_categories(message: Message):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Находим пользователя
     cursor.execute(
         "SELECT id FROM users WHERE telegram_id = ?",
         (message.from_user.id,)
@@ -24,35 +24,31 @@ async def show_categories(message: Message):
 
     user_id = user["id"]
 
-    # Получаем список категорий
     cursor.execute(
-        "SELECT name FROM categories WHERE user_id = ?",
+        "SELECT name FROM categories WHERE user_id = ? AND parent_id IS NULL",
         (user_id,)
     )
     categories = cursor.fetchall()
 
     conn.close()
 
-    if not categories:
-        await message.answer(
-            "Категорий пока нет.\n\n"
-            "Напишите название новой категории."
-        )
-    else:
-        text = "Ваши категории:\n\n"
-        for cat in categories:
-            text += f"• {cat['name']}\n"
+    text = "Ваши категории:\n\n"
+    for cat in categories:
+        text += f"• {cat['name']}\n"
 
-        text += "\nНапишите название новой категории."
+    text += "\nВведите название новой категории."
 
-        await message.answer(text)
+    waiting_for_category.add(message.from_user.id)
+
+    await message.answer(text)
 
 
-# Создание новой категории
 @router.message()
 async def create_category(message: Message):
 
-    # Игнорируем команды типа /start
+    if message.from_user.id not in waiting_for_category:
+        return
+
     if message.text.startswith("/"):
         return
 
@@ -70,13 +66,14 @@ async def create_category(message: Message):
 
     user_id = user["id"]
 
-    # Добавляем новую категорию
     cursor.execute(
-        "INSERT INTO categories (user_id, name) VALUES (?, ?)",
+        "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, NULL)",
         (user_id, message.text.strip())
     )
 
     conn.commit()
     conn.close()
+
+    waiting_for_category.remove(message.from_user.id)
 
     await message.answer(f"Категория '{message.text}' добавлена.")
