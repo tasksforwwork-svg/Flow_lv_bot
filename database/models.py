@@ -1,8 +1,70 @@
-def seed_categories(user_id):
-    from database.db import get_connection
+from database.db import get_connection
 
+
+def create_tables():
     conn = get_connection()
     cursor = conn.cursor()
+
+    # Пользователи
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Категории (с поддержкой подкатегорий через parent_id)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        name TEXT,
+        parent_id INTEGER NULL
+    )
+    """)
+
+    # Транзакции
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        amount REAL,
+        description TEXT,
+        category_id INTEGER,
+        type TEXT,
+        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Бюджеты по категориям
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS budgets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        category_id INTEGER,
+        monthly_limit REAL
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def seed_categories(user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Проверяем — вдруг уже созданы
+    cursor.execute(
+        "SELECT COUNT(*) as count FROM categories WHERE user_id = ?",
+        (user_id,)
+    )
+    existing = cursor.fetchone()["count"]
+
+    if existing > 0:
+        conn.close()
+        return
 
     structure = {
         "Еда": [
