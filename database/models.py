@@ -1,51 +1,61 @@
-from database.db import get_connection
+def seed_categories(user_id):
+    from database.db import get_connection
 
-
-def create_tables():
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Пользователи
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER UNIQUE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
+    structure = {
+        "Еда": [
+            "Продукты на неделю",
+            "Заведения",
+            "Обеды в будни"
+        ],
+        "Транспорт": [
+            "Такси",
+            "Проезд"
+        ],
+        "Базовый минимум": [
+            "Аренда",
+            "Коммунальные",
+            "Интернет",
+            "Телефон"
+        ],
+        "Здоровье": [
+            "Аптека",
+            "Врачи"
+        ],
+        "Спорт": [],
+        "Вокал": [],
+        "Развлечения": [
+            "Кино",
+            "Подписки"
+        ],
+        "Одежда": [],
+        "Косметика": [],
+        "Быт": [],
+        "Подарки": [],
+        "Импульсные покупки": [],
+        "Доход": [
+            "Зарплата",
+            "Аванс"
+        ]
+    }
 
-    # Категории
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS categories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        name TEXT,
-        parent_id INTEGER NULL
-    )
-    """)
+    for parent_name, children in structure.items():
 
-    # Транзакции
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        amount REAL,
-        description TEXT,
-        category_id INTEGER,
-        type TEXT,
-        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
+        # Создаём родительскую категорию
+        cursor.execute(
+            "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, NULL)",
+            (user_id, parent_name)
+        )
+        parent_id = cursor.lastrowid
 
-    # Бюджеты по категориям
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS budgets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        category_id INTEGER,
-        monthly_limit REAL
-    )
-    """)
+        # Создаём подкатегории
+        for child in children:
+            cursor.execute(
+                "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, ?)",
+                (user_id, child, parent_id)
+            )
 
     conn.commit()
     conn.close()
