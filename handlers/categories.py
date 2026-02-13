@@ -36,7 +36,7 @@ async def show_categories(message: Message):
     for cat in categories:
         text += f"• {cat['name']}\n"
 
-    text += "\nВведите название новой категории."
+    text += "\nВведите название новой категории или напишите 'отмена'."
 
     waiting_for_category.add(message.from_user.id)
 
@@ -47,6 +47,11 @@ async def show_categories(message: Message):
 async def create_category(message: Message):
 
     if message.from_user.id not in waiting_for_category:
+        return
+
+    if message.text.lower() == "отмена":
+        waiting_for_category.remove(message.from_user.id)
+        await message.answer("Создание категории отменено.")
         return
 
     if message.text.startswith("/"):
