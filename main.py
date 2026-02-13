@@ -3,8 +3,8 @@ from aiogram import Bot, Dispatcher
 from config import BOT_TOKEN
 
 from handlers import start
-from handlers import transactions
 from handlers import categories
+from handlers import transactions
 
 from database.models import create_tables
 
@@ -16,12 +16,12 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
-    # Подключаем роутеры
+    # ВАЖНО: порядок подключения роутеров
     dp.include_router(start.router)
-    dp.include_router(transactions.router)
     dp.include_router(categories.router)
+    dp.include_router(transactions.router)
 
-    # Запускаем бота
+    # Запуск
     await dp.start_polling(bot)
 
 
