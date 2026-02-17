@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN
 
-from handlers import start, categories, transactions, reports, budgets
+from handlers import start, categories, transactions, reports, budgets, manage
 from database.models import create_tables
 
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +26,7 @@ async def main():
     dp.include_router(transactions.router)
     dp.include_router(reports.router)
     dp.include_router(budgets.router)
+    dp.include_router(manage.router)      # ← Добавили
     dp.include_router(categories.router)
 
     try:
