@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN
 
-from handlers import start, categories, transactions, reports, budgets, manage
+from handlers import start, categories, transactions, reports, budgets, manage, add_categories
 from database.models import create_tables
 
 logging.basicConfig(level=logging.INFO)
@@ -20,13 +20,13 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    # ⚠️ ВАЖНЫЙ ПОРЯДОК:
-    dp.include_router(start.router)           # 1
-    dp.include_router(transactions.router)    # 2 - ДО categories
-    dp.include_router(manage.router)          # 3 - ДО categories  
-    dp.include_router(reports.router)         # 4
-    dp.include_router(budgets.router)         # 5
-    dp.include_router(categories.router)      # 6 - ПОСЛЕДНИМ!
+    dp.include_router(start.router)
+    dp.include_router(transactions.router)
+    dp.include_router(manage.router)
+    dp.include_router(reports.router)
+    dp.include_router(budgets.router)
+    dp.include_router(add_categories.router)
+    dp.include_router(categories.router)
 
     try:
         me = await bot.get_me()
