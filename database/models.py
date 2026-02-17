@@ -53,9 +53,11 @@ def create_tables():
 
 
 def seed_categories(user_id):
+    """Создание категорий для НОВЫХ пользователей"""
     conn = get_connection()
     cursor = conn.cursor()
 
+    # Проверяем, есть ли уже категории
     cursor.execute(
         "SELECT COUNT(*) as count FROM categories WHERE user_id = ?",
         (user_id,)
@@ -64,13 +66,15 @@ def seed_categories(user_id):
 
     if existing > 0:
         conn.close()
-        return
+        return  # Категории уже есть, не создаём заново
 
+    # Структура категорий с НОВЫМИ подкатегориями
     structure = {
         "Еда": [
             "Продукты на неделю",
             "Заведения",
-            "Обеды в будни"
+            "Обеды в будни",
+            "Кофе"  # ✅ ДОБАВЛЕНО
         ],
         "Транспорт": [
             "Такси",
@@ -90,7 +94,9 @@ def seed_categories(user_id):
         "Вокал": [],
         "Развлечения": [
             "Кино",
-            "Подписки"
+            "Подписки",
+            "ЧГК",    # ✅ ДОБАВЛЕНО
+            "Квизы"   # ✅ ДОБАВЛЕНО
         ],
         "Одежда": [],
         "Косметика": [],
@@ -103,13 +109,16 @@ def seed_categories(user_id):
         ]
     }
 
+    # Создаём категории
     for parent_name, children in structure.items():
+        # Родительская категория
         cursor.execute(
             "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, NULL)",
             (user_id, parent_name)
         )
         parent_id = cursor.lastrowid
 
+        # Подкатегории
         for child in children:
             cursor.execute(
                 "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, ?)",
