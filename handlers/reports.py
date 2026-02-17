@@ -1,20 +1,27 @@
-from aiogram import Router, F
+from aiogram import Router, F, types
+from aiogram.filters import Command
 from aiogram.types import Message
 from database.db import get_connection
 from datetime import datetime, timedelta
+import logging
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
+# ===== ОТЧЁТ ЗА ДЕНЬ (кнопка И команда) =====
 @router.message(F.text == "📊 Отчёт за день")
+@router.message(Command("day"))
 async def report_day(message: Message):
+    logger.info(f"📊 Отчёт за день запрошен пользователем {message.from_user.id}")
+    
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
     user = cursor.fetchone()
     if not user:
-        await message.answer("Сначала нажмите /start")
+        await message.answer("❌ Сначала нажмите /start")
         conn.close()
         return
     user_id = user["id"]
@@ -42,6 +49,7 @@ async def report_day(message: Message):
     conn.close()
 
     text = f"💰 **Расходы за сегодня: {total:.2f} ₽**\n\n"
+    
     if categories:
         text += "**По категориям:**\n"
         for cat in categories:
@@ -50,18 +58,22 @@ async def report_day(message: Message):
     else:
         text += "Нет расходов за сегодня."
 
-    await message.answer(text)
+    await message.answer(text, parse_mode="Markdown")
 
 
+# ===== ОТЧЁТ ЗА МЕСЯЦ (кнопка И команда) =====
 @router.message(F.text == "📅 Отчёт за месяц")
+@router.message(Command("month", "report"))
 async def report_month(message: Message):
+    logger.info(f"📅 Отчёт за месяц запрошен пользователем {message.from_user.id}")
+    
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
     user = cursor.fetchone()
     if not user:
-        await message.answer("Сначала нажмите /start")
+        await message.answer("❌ Сначала нажмите /start")
         conn.close()
         return
     user_id = user["id"]
@@ -138,18 +150,22 @@ async def report_month(message: Message):
     else:
         text += "Нет расходов за этот месяц."
 
-    await message.answer(text)
+    await message.answer(text, parse_mode="Markdown")
 
 
+# ===== ОСТАТОК БЮДЖЕТА (кнопка И команда) =====
 @router.message(F.text == "💰 Остаток бюджета")
+@router.message(Command("budget_status", "remaining"))
 async def budget_remaining(message: Message):
+    logger.info(f"💰 Проверка бюджета запрошена пользователем {message.from_user.id}")
+    
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
     user = cursor.fetchone()
     if not user:
-        await message.answer("Сначала нажмите /start")
+        await message.answer("❌ Сначала нажмите /start")
         conn.close()
         return
     user_id = user["id"]
@@ -172,7 +188,11 @@ async def budget_remaining(message: Message):
     conn.close()
 
     if not budgets:
-        await message.answer("У вас нет установленных бюджетов.\n\nИспользуйте команду:\n`/budget Категория Сумма`\n\nПример: `/budget Еда 15000`")
+        await message.answer(
+            "💰 **У вас нет установленных бюджетов**\n\n"
+            "Используйте команду:\n"
+            "`/budget` — установить бюджет на категорию"
+        )
         return
 
     text = "💰 **Бюджеты на этот месяц:**\n\n"
@@ -195,4 +215,30 @@ async def budget_remaining(message: Message):
     if alerts:
         text += "\n".join(alerts)
 
-    await message.answer(text)
+    await message.answer(text, parse_mode="Markdown")
+
+
+# ===== ПОМОЩЬ =====
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    help_text = """
+📊 **Команды бота:**
+
+💰 **Учёт расходов:**
+Просто напишите: `150 кофе` или `500 продукты`
+
+📈 **Отчёты:**
+/day - Отчёт за сегодня
+/month или /report - Отчёт за месяц
+/budget_status - Проверка бюджетов
+
+⚙️ **Настройки:**
+/budget - Установить бюджет на категорию
+/last - Последние транзакции
+/find - Поиск по транзакциям
+/edit - Редактировать транзакцию
+/delete - Удалить транзакцию
+
+/help - Эта справка
+"""
+    await message.answer(help_text, parse_mode="Markdown")
