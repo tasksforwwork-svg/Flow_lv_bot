@@ -14,7 +14,7 @@ def create_tables():
     )
     """)
 
-    # Категории (с поддержкой подкатегорий через parent_id)
+    # Категории
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS categories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,7 +43,8 @@ def create_tables():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         category_id INTEGER,
-        monthly_limit REAL
+        monthly_limit REAL,
+        UNIQUE(user_id, category_id)
     )
     """)
 
@@ -55,7 +56,6 @@ def seed_categories(user_id):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Проверяем — вдруг уже созданы
     cursor.execute(
         "SELECT COUNT(*) as count FROM categories WHERE user_id = ?",
         (user_id,)
@@ -104,15 +104,12 @@ def seed_categories(user_id):
     }
 
     for parent_name, children in structure.items():
-
-        # Создаём родительскую категорию
         cursor.execute(
             "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, NULL)",
             (user_id, parent_name)
         )
         parent_id = cursor.lastrowid
 
-        # Создаём подкатегории
         for child in children:
             cursor.execute(
                 "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, ?)",
