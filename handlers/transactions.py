@@ -4,19 +4,14 @@ from database.db import get_connection
 
 router = Router()
 
-# Временное хранилище состояний
 pending_transactions = {}
 
 
-# Шаг 1 — пользователь вводит сумму
-@router.message(F.text.regexp(r"^\d+"))
+# Шаг 1 — ввод суммы
+@router.message(F.text.regexp(r"^\d+\s+.+"))
 async def start_transaction(message: Message):
+
     parts = message.text.strip().split(" ", 1)
-
-    if len(parts) < 2:
-        await message.answer("Формат: 200 кофе")
-        return
-
     amount = float(parts[0])
     description = parts[1]
 
@@ -36,7 +31,6 @@ async def start_transaction(message: Message):
 
     user_id = user["id"]
 
-    # Сохраняем временно
     pending_transactions[message.from_user.id] = {
         "amount": amount,
         "description": description,
@@ -44,7 +38,6 @@ async def start_transaction(message: Message):
         "step": "parent"
     }
 
-    # Получаем родительские категории
     cursor.execute(
         "SELECT id, name FROM categories WHERE user_id = ? AND parent_id IS NULL",
         (user_id,)
@@ -63,12 +56,9 @@ async def start_transaction(message: Message):
     )
 
 
-# Шаг 2 — выбор родительской категории
-@router.message()
+# Шаг 2 — обработка только если есть активная транзакция
+@router.message(lambda message: message.from_user.id in pending_transactions)
 async def process_category_selection(message: Message):
-
-    if message.from_user.id not in pending_transactions:
-        return
 
     data = pending_transactions[message.from_user.id]
 
@@ -84,11 +74,11 @@ async def process_category_selection(message: Message):
         parent = cursor.fetchone()
 
         if not parent:
+            conn.close()
             return
 
         parent_id = parent["id"]
 
-        # Получаем подкатегории
         cursor.execute(
             "SELECT id, name FROM categories WHERE parent_id = ?",
             (parent_id,)
@@ -96,7 +86,6 @@ async def process_category_selection(message: Message):
         subcategories = cursor.fetchall()
 
         if not subcategories:
-            # Если нет подкатегорий — сохраняем сразу
             save_transaction(cursor, data, parent_id)
             conn.commit()
             conn.close()
@@ -104,7 +93,6 @@ async def process_category_selection(message: Message):
             await message.answer("Расход сохранён.")
             return
 
-        # Переходим к шагу подкатегорий
         data["step"] = "child"
         data["parent_id"] = parent_id
 
@@ -130,11 +118,10 @@ async def process_category_selection(message: Message):
         child = cursor.fetchone()
 
         if not child:
+            conn.close()
             return
 
-        category_id = child["id"]
-
-        save_transaction(cursor, data, category_id)
+        save_transaction(cursor, data, child["id"])
 
         conn.commit()
         conn.close()
