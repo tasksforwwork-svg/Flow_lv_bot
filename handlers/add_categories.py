@@ -5,8 +5,8 @@ from database.db import get_connection
 
 router = Router()
 
-# ⚠️ ВСТАВЬ СВОЙ ID НИЖЕ:
-ADMIN_ID = 8434411798
+# ✅ ТВОЙ ПРАВИЛЬНЫЙ ID:
+ADMIN_ID = 534808305
 
 
 @router.message(Command("addcategories"))
@@ -28,7 +28,6 @@ async def add_missing_categories(message: Message):
     user_id = user["id"]
     added = []
     
-    # Категории для добавления
     to_add = [
         ("Еда", "Кофе"),
         ("Развлечения", "ЧГК"),
@@ -62,9 +61,9 @@ async def add_missing_categories(message: Message):
     conn.close()
     
     if added:
-        await message.answer(f"✅ Добавлено:\n" + "\n".join(f"• {x}" for x in added) + "\n\nТеперь /start")
+        await message.answer(f"✅ Добавлено:\n" + "\n".join(f"• {x}" for x in added) + "\n\nТеперь отправь /start")
     else:
-        await message.answer("⚠️ Ничего не добавлено (уже есть)")
+        await message.answer("⚠️ Ничего не добавлено (уже существуют)")
 
 
 @router.message(Command("myid"))
