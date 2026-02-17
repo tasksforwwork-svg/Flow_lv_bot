@@ -4,7 +4,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from database.db import get_connection
-from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,10 +26,23 @@ async def show_last_transactions(message: Message):
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
     user = cursor.fetchone()
     if not user:
-        await message.answer("Сначала нажмите /start")
+        await message.answer("❌ Сначала нажмите /start")
         conn.close()
         return
     user_id = user["id"]
+
+    # Проверяем, есть ли вообще транзакции
+    cursor.execute("SELECT COUNT(*) as count FROM transactions WHERE user_id = ?", (user_id,))
+    count = cursor.fetchone()["count"]
+    
+    if count == 0:
+        await message.answer(
+            "📋 **У вас пока нет транзакций**\n\n"
+            "Добавьте первую:\n"
+            "Пример: `100 Кофе`"
+        )
+        conn.close()
+        return
 
     cursor.execute("""
         SELECT t.id, t.amount, t.description, t.date, c.name as category
@@ -44,17 +56,13 @@ async def show_last_transactions(message: Message):
     transactions = cursor.fetchall()
     conn.close()
 
-    if not transactions:
-        await message.answer("У вас пока нет транзакций.")
-        return
-
-    text = "📋 **Последние 10 операций:**\n\n"
+    text = f"📋 **Последние {len(transactions)} операций** (всего: {count}):\n\n"
     
     keyboard = []
     for t in transactions:
         date_str = t["date"][:16].replace("T", " ")
-        text += f"• **ID {t['id']}** | {t['amount']:.2f} ₽ | {t['category']}\n"
-        text += f"  _{t['description']} | {date_str}_\n\n"
+        text += f"🔹 **ID {t['id']}** | {t['amount']:.2f} ₽ | {t['category']}\n"
+        text += f"   _{t['description']} | {date_str}_\n\n"
         
         keyboard.append([
             InlineKeyboardButton(text=f"✏️ {t['id']}", callback_data=f"edit_{t['id']}"),
@@ -75,34 +83,51 @@ async def show_last_transactions(message: Message):
 async def callback_edit_transaction(callback: types.CallbackQuery, state: FSMContext):
     transaction_id = int(callback.data.split("_")[1])
     
-    logger.info(f"Попытка редактирования транзакции {transaction_id}")
+    logger.info(f" Редактирование транзакции {transaction_id} пользователем {callback.from_user.id}")
     
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Получаем user_id
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (callback.from_user.id,))
     user = cursor.fetchone()
+    
     if not user:
-        await callback.answer("Ошибка пользователя.", show_alert=True)
+        logger.error(f"Пользователь {callback.from_user.id} не найден в БД")
+        await callback.answer("❌ Ошибка: пользователь не найден. Нажмите /start", show_alert=True)
         conn.close()
         return
-    user_id = user["id"]
     
+    user_id = user["id"]
+    logger.info(f"User ID в БД: {user_id}")
+    
+    # Проверяем транзакцию
     cursor.execute("""
-        SELECT t.id, t.amount, t.description, c.name as category
+        SELECT t.id, t.amount, t.description, t.category_id, c.name as category
         FROM transactions t
         JOIN categories c ON t.category_id = c.id
         WHERE t.id = ? AND t.user_id = ?
     """, (transaction_id, user_id))
     
     transaction = cursor.fetchone()
-    conn.close()
     
     if not transaction:
-        await callback.answer("Транзакция не найдена.", show_alert=True)
+        # Дополнительная проверка - существует ли транзакция вообще
+        cursor.execute("SELECT user_id FROM transactions WHERE id = ?", (transaction_id,))
+        other_transaction = cursor.fetchone()
+        
+        if other_transaction:
+            logger.warning(f"Транзакция {transaction_id} принадлежит другому пользователю (user_id={other_transaction['user_id']})")
+            await callback.answer(f"❌ Транзакция #{transaction_id} принадлежит другому пользователю", show_alert=True)
+        else:
+            logger.warning(f"Транзакция {transaction_id} не существует")
+            await callback.answer(f"❌ Транзакция #{transaction_id} не существует", show_alert=True)
+        
+        conn.close()
         return
     
-    # Сохраняем данные в состояние
+    logger.info(f"✅ Транзакция найдена: {transaction}")
+    
     await state.update_data(
         transaction_id=transaction_id, 
         user_id=user_id,
@@ -133,19 +158,17 @@ async def callback_edit_transaction(callback: types.CallbackQuery, state: FSMCon
 @router.callback_query(F.data == "edit_amount")
 async def edit_amount_start(callback: types.CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
-    logger.info(f"Текущее состояние: {current_state}")
     
-    # Проверяем, что мы в правильном состоянии
     if current_state != ManageState.waiting_for_edit_action.state:
-        await callback.answer("Сессия истекла. Начните сначала через /last", show_alert=True)
+        await callback.answer("⏱ Сессия истекла. Начните сначала через /last", show_alert=True)
         return
     
     await state.set_state(ManageState.waiting_for_new_amount)
     
     await callback.message.edit_text(
-        "💰 **Введите новую сумму** (только число):\n\n"
-        "Пример: `500`\n\n"
-        "Отправьте число сообщением:",
+        "💰 **Введите новую сумму**\n\n"
+        "Отправьте число сообщением:\n"
+        "Пример: `500`",
         parse_mode="Markdown"
     )
     await callback.answer()
@@ -154,8 +177,7 @@ async def edit_amount_start(callback: types.CallbackQuery, state: FSMContext):
 # ===== СОХРАНЕНИЕ НОВОЙ СУММЫ =====
 @router.message(ManageState.waiting_for_new_amount)
 async def save_new_amount(message: Message, state: FSMContext):
-    # Проверяем, что это число
-    if not message.text.isdigit():
+    if not message.text.strip().isdigit():
         await message.answer("❌ Пожалуйста, введите только число. Пример: `500`")
         return
     
@@ -163,15 +185,18 @@ async def save_new_amount(message: Message, state: FSMContext):
     transaction_id = data.get("transaction_id")
     
     if not transaction_id:
-        await message.answer("❌ Ошибка: транзакция не найдена. Начните сначала через /last")
+        await message.answer("❌ Ошибка сессии. Начните сначала через /last")
         await state.clear()
         return
     
-    new_amount = float(message.text)
+    new_amount = float(message.text.strip())
+    old_amount = data.get("old_amount", "?")
     
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        
+        logger.info(f"Обновление транзакции {transaction_id}: {old_amount} -> {new_amount}")
         
         cursor.execute(
             "UPDATE transactions SET amount = ? WHERE id = ?", 
@@ -179,24 +204,25 @@ async def save_new_amount(message: Message, state: FSMContext):
         )
         conn.commit()
         
-        # Проверяем, сколько строк обновилось
-        if cursor.rowcount > 0:
+        updated = cursor.rowcount
+        conn.close()
+        
+        if updated > 0:
             await message.answer(
                 f"✅ **Сумма обновлена!**\n\n"
-                f"Было: {data.get('old_amount', '?'):.2f} ₽\n"
-                f"Стало: {new_amount:.2f} ₽\n\n"
-                f"Используйте /last чтобы увидеть изменения",
-                parse_mode="Markdown"
+                f"🔹 Транзакция #{transaction_id}\n"
+                f"📉 Было: {old_amount} ₽\n"
+                f"📈 Стало: {new_amount} ₽\n\n"
+                f"Используйте /last чтобы проверить"
             )
         else:
-            await message.answer("❌ Не удалось обновить транзакцию.")
+            await message.answer("❌ Не удалось обновить. Транзакция не найдена.")
         
-        conn.close()
         await state.clear()
         
     except Exception as e:
         logger.error(f"Ошибка при обновлении суммы: {e}")
-        await message.answer(f"❌ Произошла ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
         await state.clear()
 
 
@@ -205,14 +231,14 @@ async def save_new_amount(message: Message, state: FSMContext):
 async def edit_category_start(callback: types.CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
     if current_state != ManageState.waiting_for_edit_action.state:
-        await callback.answer("Сессия истекла. Начните сначала через /last", show_alert=True)
+        await callback.answer("⏱ Сессия истекла. Начните сначала через /last", show_alert=True)
         return
     
     data = await state.get_data()
     user_id = data.get("user_id")
     
     if not user_id:
-        await callback.answer("Ошибка пользователя.", show_alert=True)
+        await callback.answer("❌ Ошибка пользователя", show_alert=True)
         return
     
     conn = get_connection()
@@ -238,7 +264,7 @@ async def edit_category_start(callback: types.CallbackQuery, state: FSMContext):
 async def save_new_category(callback: types.CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
     if current_state != ManageState.waiting_for_new_category.state:
-        await callback.answer("Сессия истекла.", show_alert=True)
+        await callback.answer("⏱ Сессия истекла", show_alert=True)
         return
     
     data = await state.get_data()
@@ -246,7 +272,7 @@ async def save_new_category(callback: types.CallbackQuery, state: FSMContext):
     new_category_id = int(callback.data.split("_")[1])
     
     if not transaction_id:
-        await callback.answer("Ошибка: транзакция не найдена.", show_alert=True)
+        await callback.answer("❌ Ошибка: транзакция не найдена", show_alert=True)
         return
     
     try:
@@ -260,13 +286,17 @@ async def save_new_category(callback: types.CallbackQuery, state: FSMContext):
         conn.commit()
         conn.close()
         
-        await callback.message.edit_text("✅ **Категория обновлена!**\n\nИспользуйте /last чтобы увидеть изменения.")
+        await callback.message.edit_text(
+            f"✅ **Категория обновлена!**\n\n"
+            f"Транзакция #{transaction_id} изменена.\n"
+            f"Используйте /last чтобы проверить"
+        )
         await state.clear()
         await callback.answer()
         
     except Exception as e:
         logger.error(f"Ошибка при обновлении категории: {e}")
-        await callback.answer(f"Ошибка: {e}", show_alert=True)
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 
 # ===== ИЗМЕНИТЬ ОПИСАНИЕ =====
@@ -274,7 +304,7 @@ async def save_new_category(callback: types.CallbackQuery, state: FSMContext):
 async def edit_description_start(callback: types.CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
     if current_state != ManageState.waiting_for_edit_action.state:
-        await callback.answer("Сессия истекла. Начните сначала через /last", show_alert=True)
+        await callback.answer("⏱ Сессия истекла. Начните сначала через /last", show_alert=True)
         return
     
     await state.set_state(ManageState.waiting_for_new_description)
@@ -298,7 +328,7 @@ async def save_new_description(message: Message, state: FSMContext):
     new_description = message.text.strip()
     
     if not transaction_id:
-        await message.answer("❌ Ошибка: транзакция не найдена.")
+        await message.answer("❌ Ошибка сессии. Начните сначала через /last")
         await state.clear()
         return
     
@@ -315,14 +345,14 @@ async def save_new_description(message: Message, state: FSMContext):
         
         await message.answer(
             f"✅ **Описание обновлено!**\n\n"
-            f"Новое описание: {new_description}\n\n"
-            f"Используйте /last чтобы увидеть изменения"
+            f"🔹 Транзакция #{transaction_id}\n"
+            f"📝 Новое описание: {new_description}"
         )
         await state.clear()
         
     except Exception as e:
         logger.error(f"Ошибка при обновлении описания: {e}")
-        await message.answer(f"❌ Произошла ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
         await state.clear()
 
 
@@ -345,7 +375,7 @@ async def callback_delete_transaction(callback: types.CallbackQuery):
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (callback.from_user.id,))
     user = cursor.fetchone()
     if not user:
-        await callback.answer("Ошибка пользователя.", show_alert=True)
+        await callback.answer("❌ Ошибка пользователя", show_alert=True)
         conn.close()
         return
     user_id = user["id"]
@@ -354,7 +384,7 @@ async def callback_delete_transaction(callback: types.CallbackQuery):
     transaction = cursor.fetchone()
     
     if not transaction:
-        await callback.answer("Транзакция не найдена.", show_alert=True)
+        await callback.answer(f"❌ Транзакция #{transaction_id} не найдена", show_alert=True)
         conn.close()
         return
     
@@ -366,163 +396,24 @@ async def callback_delete_transaction(callback: types.CallbackQuery):
         f"🗑 **Транзакция #{transaction_id} удалена!**",
         parse_mode="Markdown"
     )
-    await callback.answer("Транзакция удалена!")
+    await callback.answer("✅ Удалено!")
 
 
-# ===== ПОИСК =====
-@router.message(Command("find", "search"))
-async def search_transactions(message: Message):
-    args = message.text.split(maxsplit=1)
-    
-    if len(args) < 2:
-        await message.answer(
-            "🔍 **Поиск по транзакциям**\n\n"
-            "Использование:\n"
-            "`/find кофе` — найти все траты со словом 'кофе'\n"
-            "`/find 2024-01` — найти траты за январь 2024\n"
-            "`/find Еда` — найти все траты в категории 'Еда'\n"
-            "`/find >1000` — найти траты больше 1000₽\n"
-            "`/find <500` — найти траты меньше 500₽"
-        )
-        return
-    
-    search_query = args[1].lower()
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
-    user = cursor.fetchone()
-    if not user:
-        await message.answer("Сначала нажмите /start")
-        conn.close()
-        return
-    user_id = user["id"]
-    
-    if search_query.startswith(">"):
-        amount = float(search_query[1:])
-        cursor.execute("""
-            SELECT t.id, t.amount, t.description, t.date, c.name as category
-            FROM transactions t
-            JOIN categories c ON t.category_id = c.id
-            WHERE t.user_id = ? AND t.amount > ?
-            ORDER BY t.date DESC
-            LIMIT 20
-        """, (user_id, amount))
-        search_type = f"больше {amount}₽"
-        
-    elif search_query.startswith("<"):
-        amount = float(search_query[1:])
-        cursor.execute("""
-            SELECT t.id, t.amount, t.description, t.date, c.name as category
-            FROM transactions t
-            JOIN categories c ON t.category_id = c.id
-            WHERE t.user_id = ? AND t.amount < ?
-            ORDER BY t.date DESC
-            LIMIT 20
-        """, (user_id, amount))
-        search_type = f"меньше {amount}₽"
-        
-    elif "-" in search_query and len(search_query) == 7:
-        cursor.execute("""
-            SELECT t.id, t.amount, t.description, t.date, c.name as category
-            FROM transactions t
-            JOIN categories c ON t.category_id = c.id
-            WHERE t.user_id = ? AND strftime('%Y-%m', t.date) = ?
-            ORDER BY t.date DESC
-            LIMIT 20
-        """, (user_id, search_query))
-        search_type = f"за {search_query}"
-        
-    else:
-        cursor.execute("""
-            SELECT t.id, t.amount, t.description, t.date, c.name as category
-            FROM transactions t
-            JOIN categories c ON t.category_id = c.id
-            WHERE t.user_id = ? AND (LOWER(t.description) LIKE ? OR LOWER(c.name) LIKE ?)
-            ORDER BY t.date DESC
-            LIMIT 20
-        """, (user_id, f"%{search_query}%", f"%{search_query}%"))
-        search_type = f"по запросу '{search_query}'"
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    if not results:
-        await message.answer(f"🔍 Ничего не найдено {search_type}")
-        return
-    
-    text = f"🔍 **Найдено {len(results)} транзакций** {search_type}:\n\n"
-    total = 0
-    
-    for t in results:
-        date_str = t["date"][:16].replace("T", " ")
-        text += f"• {t['amount']:.2f} ₽ | {t['category']}\n"
-        text += f"  _{t['description']} | {date_str}_\n\n"
-        total += t["amount"]
-    
-    text += f"\n💰 **Итого: {total:.2f} ₽**"
-    
-    await message.answer(text, parse_mode="Markdown")
-
-
-# ===== УДАЛИТЬ ПО ID =====
-@router.message(Command("delete"))
-async def delete_by_id(message: Message):
-    args = message.text.split(maxsplit=1)
-    
-    if len(args) < 2 or not args[1].isdigit():
-        await message.answer(
-            "🗑 **Удаление транзакции**\n\n"
-            "Использование:\n"
-            "`/delete 123` — удалить транзакцию с ID 123\n\n"
-            "Чтобы узнать ID, используйте `/last`"
-        )
-        return
-    
-    transaction_id = int(args[1])
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
-    user = cursor.fetchone()
-    if not user:
-        await message.answer("Сначала нажмите /start")
-        conn.close()
-        return
-    user_id = user["id"]
-    
-    cursor.execute("SELECT id FROM transactions WHERE id = ? AND user_id = ?", (transaction_id, user_id))
-    transaction = cursor.fetchone()
-    
-    if not transaction:
-        await message.answer("Транзакция не найдена или не принадлежит вам.")
-        conn.close()
-        return
-    
-    cursor.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (transaction_id, user_id))
-    conn.commit()
-    conn.close()
-    
-    await message.answer(f"✅ Транзакция #{transaction_id} удалена!")
-
-
-# ===== РЕДАКТИРОВАТЬ ПО ID =====
+# ===== КОМАНДА /edit =====
 @router.message(Command("edit"))
 async def edit_by_id(message: Message, state: FSMContext):
     args = message.text.split(maxsplit=1)
     
-    if len(args) < 2 or not args[1].isdigit():
+    if len(args) < 2 or not args[1].strip().isdigit():
         await message.answer(
             "✏️ **Редактирование транзакции**\n\n"
             "Использование:\n"
             "`/edit 123` — редактировать транзакцию с ID 123\n\n"
-            "Чтобы узнать ID, используйте `/last`"
+            "💡 **Сначала используйте `/last`** чтобы увидеть ID транзакций!"
         )
         return
     
-    transaction_id = int(args[1])
+    transaction_id = int(args[1].strip())
     
     conn = get_connection()
     cursor = conn.cursor()
@@ -530,7 +421,7 @@ async def edit_by_id(message: Message, state: FSMContext):
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
     user = cursor.fetchone()
     if not user:
-        await message.answer("Сначала нажмите /start")
+        await message.answer("❌ Сначала нажмите /start")
         conn.close()
         return
     user_id = user["id"]
@@ -543,11 +434,29 @@ async def edit_by_id(message: Message, state: FSMContext):
     """, (transaction_id, user_id))
     
     transaction = cursor.fetchone()
-    conn.close()
     
     if not transaction:
-        await message.answer("Транзакция не найдена или не принадлежит вам.")
+        # Показываем какие ID существуют
+        cursor.execute("SELECT id FROM transactions WHERE user_id = ? LIMIT 5", (user_id,))
+        existing = cursor.fetchall()
+        conn.close()
+        
+        if existing:
+            ids = ", ".join(str(t["id"]) for t in existing)
+            await message.answer(
+                f"❌ **Транзакция #{transaction_id} не найдена**\n\n"
+                f"💡 Доступные ID: {ids}\n"
+                f"Используйте `/last` чтобы увидеть все"
+            )
+        else:
+            await message.answer(
+                "❌ **У вас нет транзакций**\n\n"
+                "Добавьте первую:\n"
+                "Пример: `100 Кофе`"
+            )
         return
+    
+    conn.close()
     
     await state.update_data(
         transaction_id=transaction_id, 
