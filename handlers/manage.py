@@ -5,11 +5,20 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from database.db import get_connection
 from datetime import datetime
+import logging
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
-# ===== ПОСЛЕДНИЕ ТРАНЗАКЦИИ С КНОПКАМИ =====
+class ManageState(StatesGroup):
+    waiting_for_edit_action = State()
+    waiting_for_new_amount = State()
+    waiting_for_new_category = State()
+    waiting_for_new_description = State()
+
+
+# ===== ПОСЛЕДНИЕ ТРАНЗАКЦИИ =====
 @router.message(Command("last", "recent"))
 async def show_last_transactions(message: Message):
     conn = get_connection()
@@ -23,7 +32,6 @@ async def show_last_transactions(message: Message):
         return
     user_id = user["id"]
 
-    # Последние 10 транзакций
     cursor.execute("""
         SELECT t.id, t.amount, t.description, t.date, c.name as category
         FROM transactions t
@@ -48,7 +56,6 @@ async def show_last_transactions(message: Message):
         text += f"• **ID {t['id']}** | {t['amount']:.2f} ₽ | {t['category']}\n"
         text += f"  _{t['description']} | {date_str}_\n\n"
         
-        # Кнопки для каждой транзакции
         keyboard.append([
             InlineKeyboardButton(text=f"✏️ {t['id']}", callback_data=f"edit_{t['id']}"),
             InlineKeyboardButton(text=f"🗑 {t['id']}", callback_data=f"delete_{t['id']}")
@@ -63,10 +70,12 @@ async def show_last_transactions(message: Message):
     )
 
 
-# ===== ОБРАБОТКА НАЖАТИЙ НА КНОПКИ =====
+# ===== ОБРАБОТКА КНОПКИ РЕДАКТИРОВАНИЯ =====
 @router.callback_query(F.data.startswith("edit_"))
 async def callback_edit_transaction(callback: types.CallbackQuery, state: FSMContext):
     transaction_id = int(callback.data.split("_")[1])
+    
+    logger.info(f"Попытка редактирования транзакции {transaction_id}")
     
     conn = get_connection()
     cursor = conn.cursor()
@@ -79,7 +88,6 @@ async def callback_edit_transaction(callback: types.CallbackQuery, state: FSMCon
         return
     user_id = user["id"]
     
-    # Проверяем, что транзакция принадлежит пользователю
     cursor.execute("""
         SELECT t.id, t.amount, t.description, c.name as category
         FROM transactions t
@@ -94,7 +102,12 @@ async def callback_edit_transaction(callback: types.CallbackQuery, state: FSMCon
         await callback.answer("Транзакция не найдена.", show_alert=True)
         return
     
-    await state.update_data(transaction_id=transaction_id, user_id=user_id)
+    # Сохраняем данные в состояние
+    await state.update_data(
+        transaction_id=transaction_id, 
+        user_id=user_id,
+        old_amount=transaction['amount']
+    )
     await state.set_state(ManageState.waiting_for_edit_action)
     
     keyboard = [
@@ -116,6 +129,212 @@ async def callback_edit_transaction(callback: types.CallbackQuery, state: FSMCon
     await callback.answer()
 
 
+# ===== ИЗМЕНИТЬ СУММУ =====
+@router.callback_query(F.data == "edit_amount")
+async def edit_amount_start(callback: types.CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    logger.info(f"Текущее состояние: {current_state}")
+    
+    # Проверяем, что мы в правильном состоянии
+    if current_state != ManageState.waiting_for_edit_action.state:
+        await callback.answer("Сессия истекла. Начните сначала через /last", show_alert=True)
+        return
+    
+    await state.set_state(ManageState.waiting_for_new_amount)
+    
+    await callback.message.edit_text(
+        "💰 **Введите новую сумму** (только число):\n\n"
+        "Пример: `500`\n\n"
+        "Отправьте число сообщением:",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+# ===== СОХРАНЕНИЕ НОВОЙ СУММЫ =====
+@router.message(ManageState.waiting_for_new_amount)
+async def save_new_amount(message: Message, state: FSMContext):
+    # Проверяем, что это число
+    if not message.text.isdigit():
+        await message.answer("❌ Пожалуйста, введите только число. Пример: `500`")
+        return
+    
+    data = await state.get_data()
+    transaction_id = data.get("transaction_id")
+    
+    if not transaction_id:
+        await message.answer("❌ Ошибка: транзакция не найдена. Начните сначала через /last")
+        await state.clear()
+        return
+    
+    new_amount = float(message.text)
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE transactions SET amount = ? WHERE id = ?", 
+            (new_amount, transaction_id)
+        )
+        conn.commit()
+        
+        # Проверяем, сколько строк обновилось
+        if cursor.rowcount > 0:
+            await message.answer(
+                f"✅ **Сумма обновлена!**\n\n"
+                f"Было: {data.get('old_amount', '?'):.2f} ₽\n"
+                f"Стало: {new_amount:.2f} ₽\n\n"
+                f"Используйте /last чтобы увидеть изменения",
+                parse_mode="Markdown"
+            )
+        else:
+            await message.answer("❌ Не удалось обновить транзакцию.")
+        
+        conn.close()
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении суммы: {e}")
+        await message.answer(f"❌ Произошла ошибка: {e}")
+        await state.clear()
+
+
+# ===== ИЗМЕНИТЬ КАТЕГОРИЮ =====
+@router.callback_query(F.data == "edit_category")
+async def edit_category_start(callback: types.CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state != ManageState.waiting_for_edit_action.state:
+        await callback.answer("Сессия истекла. Начните сначала через /last", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    
+    if not user_id:
+        await callback.answer("Ошибка пользователя.", show_alert=True)
+        return
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id, name FROM categories WHERE user_id = ? AND parent_id IS NULL", (user_id,))
+    categories = cursor.fetchall()
+    conn.close()
+    
+    keyboard = [[InlineKeyboardButton(text=cat["name"], callback_data=f"cat_{cat['id']}")] for cat in categories]
+    keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="close_transactions")])
+    
+    await state.set_state(ManageState.waiting_for_new_category)
+    
+    await callback.message.edit_text(
+        "📁 **Выберите новую категорию:**",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat_"))
+async def save_new_category(callback: types.CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state != ManageState.waiting_for_new_category.state:
+        await callback.answer("Сессия истекла.", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    transaction_id = data.get("transaction_id")
+    new_category_id = int(callback.data.split("_")[1])
+    
+    if not transaction_id:
+        await callback.answer("Ошибка: транзакция не найдена.", show_alert=True)
+        return
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE transactions SET category_id = ? WHERE id = ?", 
+            (new_category_id, transaction_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        await callback.message.edit_text("✅ **Категория обновлена!**\n\nИспользуйте /last чтобы увидеть изменения.")
+        await state.clear()
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении категории: {e}")
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+
+# ===== ИЗМЕНИТЬ ОПИСАНИЕ =====
+@router.callback_query(F.data == "edit_description")
+async def edit_description_start(callback: types.CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state != ManageState.waiting_for_edit_action.state:
+        await callback.answer("Сессия истекла. Начните сначала через /last", show_alert=True)
+        return
+    
+    await state.set_state(ManageState.waiting_for_new_description)
+    
+    await callback.message.edit_text(
+        "📝 **Введите новое описание:**\n\n"
+        "Пример: `Обед в кафе`",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@router.message(ManageState.waiting_for_new_description)
+async def save_new_description(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state != ManageState.waiting_for_new_description.state:
+        return
+    
+    data = await state.get_data()
+    transaction_id = data.get("transaction_id")
+    new_description = message.text.strip()
+    
+    if not transaction_id:
+        await message.answer("❌ Ошибка: транзакция не найдена.")
+        await state.clear()
+        return
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE transactions SET description = ? WHERE id = ?", 
+            (new_description, transaction_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        await message.answer(
+            f"✅ **Описание обновлено!**\n\n"
+            f"Новое описание: {new_description}\n\n"
+            f"Используйте /last чтобы увидеть изменения"
+        )
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении описания: {e}")
+        await message.answer(f"❌ Произошла ошибка: {e}")
+        await state.clear()
+
+
+# ===== ЗАКРЫТЬ =====
+@router.callback_query(F.data == "close_transactions")
+async def callback_close_transactions(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.delete()
+    await callback.answer()
+
+
+# ===== УДАЛЕНИЕ =====
 @router.callback_query(F.data.startswith("delete_"))
 async def callback_delete_transaction(callback: types.CallbackQuery):
     transaction_id = int(callback.data.split("_")[1])
@@ -131,7 +350,6 @@ async def callback_delete_transaction(callback: types.CallbackQuery):
         return
     user_id = user["id"]
     
-    # Проверяем принадлежность
     cursor.execute("SELECT id FROM transactions WHERE id = ? AND user_id = ?", (transaction_id, user_id))
     transaction = cursor.fetchone()
     
@@ -140,7 +358,6 @@ async def callback_delete_transaction(callback: types.CallbackQuery):
         conn.close()
         return
     
-    # Удаляем
     cursor.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (transaction_id, user_id))
     conn.commit()
     conn.close()
@@ -152,121 +369,9 @@ async def callback_delete_transaction(callback: types.CallbackQuery):
     await callback.answer("Транзакция удалена!")
 
 
-@router.callback_query(F.data == "close_transactions")
-async def callback_close_transactions(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await callback.answer()
-
-
-# ===== СОСТОЯНИЯ ДЛЯ РЕДАКТИРОВАНИЯ =====
-class ManageState(StatesGroup):
-    waiting_for_edit_action = State()
-    waiting_for_new_amount = State()
-    waiting_for_new_category = State()
-    waiting_for_new_description = State()
-
-
-# ===== ВЫБОР ЧТО РЕДАКТИРОВАТЬ =====
-@router.callback_query(ManageState.waiting_for_edit_action, F.data == "edit_amount")
-async def edit_amount_start(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(ManageState.waiting_for_new_amount)
-    await callback.message.edit_text(
-        "💰 Введите новую сумму (только число):\n\nПример: `500`",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-
-@router.callback_query(ManageState.waiting_for_edit_action, F.data == "edit_category")
-async def edit_category_start(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    user_id = data["user_id"]
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT id, name FROM categories WHERE user_id = ? AND parent_id IS NULL", (user_id,))
-    categories = cursor.fetchall()
-    conn.close()
-    
-    keyboard = [[InlineKeyboardButton(text=cat["name"], callback_data=f"cat_{cat['id']}")] for cat in categories]
-    keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="close_transactions")])
-    
-    await state.set_state(ManageState.waiting_for_new_category)
-    await callback.message.edit_text(
-        "📁 Выберите новую категорию:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
-    await callback.answer()
-
-
-@router.callback_query(ManageState.waiting_for_edit_action, F.data == "edit_description")
-async def edit_description_start(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(ManageState.waiting_for_new_description)
-    await callback.message.edit_text(
-        "📝 Введите новое описание:\n\nПример: `Обед в кафе`",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-
-# ===== СОХРАНЕНИЕ ИЗМЕНЕНИЙ =====
-@router.message(ManageState.waiting_for_new_amount, F.text.regexp(r"^\d+$"))
-async def save_new_amount(message: Message, state: FSMContext):
-    data = await state.get_data()
-    transaction_id = data["transaction_id"]
-    new_amount = float(message.text)
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("UPDATE transactions SET amount = ? WHERE id = ?", (new_amount, transaction_id))
-    conn.commit()
-    conn.close()
-    
-    await state.clear()
-    await message.answer(f"✅ Сумма обновлена: {new_amount:.2f} ₽")
-
-
-@router.callback_query(ManageState.waiting_for_new_category, F.data.startswith("cat_"))
-async def save_new_category(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    transaction_id = data["transaction_id"]
-    new_category_id = int(callback.data.split("_")[1])
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (new_category_id, transaction_id))
-    conn.commit()
-    conn.close()
-    
-    await state.clear()
-    await callback.message.edit_text("✅ Категория обновлена!")
-    await callback.answer()
-
-
-@router.message(ManageState.waiting_for_new_description)
-async def save_new_description(message: Message, state: FSMContext):
-    data = await state.get_data()
-    transaction_id = data["transaction_id"]
-    new_description = message.text.strip()
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("UPDATE transactions SET description = ? WHERE id = ?", (new_description, transaction_id))
-    conn.commit()
-    conn.close()
-    
-    await state.clear()
-    await message.answer(f"✅ Описание обновлено: {new_description}")
-
-
-# ===== ПОИСК ПО ТРАНЗАКЦИЯМ =====
+# ===== ПОИСК =====
 @router.message(Command("find", "search"))
 async def search_transactions(message: Message):
-    # Получаем поисковый запрос из команды
     args = message.text.split(maxsplit=1)
     
     if len(args) < 2:
@@ -294,9 +399,7 @@ async def search_transactions(message: Message):
         return
     user_id = user["id"]
     
-    # Определяем тип поиска
     if search_query.startswith(">"):
-        # Поиск по сумме больше
         amount = float(search_query[1:])
         cursor.execute("""
             SELECT t.id, t.amount, t.description, t.date, c.name as category
@@ -309,7 +412,6 @@ async def search_transactions(message: Message):
         search_type = f"больше {amount}₽"
         
     elif search_query.startswith("<"):
-        # Поиск по сумме меньше
         amount = float(search_query[1:])
         cursor.execute("""
             SELECT t.id, t.amount, t.description, t.date, c.name as category
@@ -322,7 +424,6 @@ async def search_transactions(message: Message):
         search_type = f"меньше {amount}₽"
         
     elif "-" in search_query and len(search_query) == 7:
-        # Поиск по месяцу (2024-01)
         cursor.execute("""
             SELECT t.id, t.amount, t.description, t.date, c.name as category
             FROM transactions t
@@ -334,7 +435,6 @@ async def search_transactions(message: Message):
         search_type = f"за {search_query}"
         
     else:
-        # Поиск по тексту в описании или категории
         cursor.execute("""
             SELECT t.id, t.amount, t.description, t.date, c.name as category
             FROM transactions t
@@ -366,7 +466,7 @@ async def search_transactions(message: Message):
     await message.answer(text, parse_mode="Markdown")
 
 
-# ===== КОМАНДА /delete по ID =====
+# ===== УДАЛИТЬ ПО ID =====
 @router.message(Command("delete"))
 async def delete_by_id(message: Message):
     args = message.text.split(maxsplit=1)
@@ -408,7 +508,7 @@ async def delete_by_id(message: Message):
     await message.answer(f"✅ Транзакция #{transaction_id} удалена!")
 
 
-# ===== КОМАНДА /edit по ID =====
+# ===== РЕДАКТИРОВАТЬ ПО ID =====
 @router.message(Command("edit"))
 async def edit_by_id(message: Message, state: FSMContext):
     args = message.text.split(maxsplit=1)
@@ -449,7 +549,11 @@ async def edit_by_id(message: Message, state: FSMContext):
         await message.answer("Транзакция не найдена или не принадлежит вам.")
         return
     
-    await state.update_data(transaction_id=transaction_id, user_id=user_id)
+    await state.update_data(
+        transaction_id=transaction_id, 
+        user_id=user_id,
+        old_amount=transaction['amount']
+    )
     await state.set_state(ManageState.waiting_for_edit_action)
     
     keyboard = [
