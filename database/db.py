@@ -1,6 +1,11 @@
 import sqlite3
+from pathlib import Path
+
+# Получаем путь к текущему файлу и идем на уровень вверх
+BASE_DIR = Path(__file__).parent.parent
+DB_PATH = BASE_DIR / "database.db"
 
 def get_connection():
-    conn = sqlite3.connect("database.db")
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
