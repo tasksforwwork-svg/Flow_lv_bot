@@ -3,20 +3,38 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from database.db import get_connection
+import logging
+import re
 
+logger = logging.getLogger(__name__)
 router = Router()
 
-# Описываем состояния
-class ExpenseState(StatesGroup):
+
+class TransactionState(StatesGroup):
     waiting_for_category = State()
     waiting_for_subcategory = State()
+    waiting_for_description = State()
 
-# Шаг 1 — ввод суммы (триггер: число пробел текст)
-@router.message(F.text.regexp(r"^\d+\s+.+"))
+
+# ===== ШАГ 1 — ВВОД СУММЫ (гибкий парсинг) =====
+@router.message(F.text.regexp(r"^[\d]+([,.]\d+)?(\s+.+)?$"))
 async def start_transaction(message: Message, state: FSMContext):
-    parts = message.text.strip().split(" ", 1)
-    amount = float(parts[0])
-    description = parts[1]
+    text = message.text.strip()
+    
+    # Извлекаем число (заменяем запятую на точку)
+    match = re.match(r"^[\d]+([,.]\d+)?", text)
+    if not match:
+        return
+    
+    amount_str = match.group(0).replace(",", ".")
+    amount = float(amount_str)
+    
+    # Извлекаем описание (если есть)
+    description = text[match.end():].strip()
+    if not description:
+        description = "Без описания"
+    
+    logger.info(f"💰 Получена транзакция: {amount} ₽, описание: {description}")
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -25,15 +43,19 @@ async def start_transaction(message: Message, state: FSMContext):
     user = cursor.fetchone()
 
     if not user:
-        await message.answer("Сначала нажмите /start")
+        await message.answer("❌ Сначала нажмите /start")
         conn.close()
         return
 
     user_id = user["id"]
 
-    # Сохраняем данные в состояние FSM
-    await state.update_data(amount=amount, description=description, user_id=user_id)
-    await state.set_state(ExpenseState.waiting_for_category)
+    # Сохраняем данные в состояние
+    await state.update_data(
+        amount=amount, 
+        description=description, 
+        user_id=user_id
+    )
+    await state.set_state(TransactionState.waiting_for_category)
 
     cursor.execute("SELECT id, name FROM categories WHERE user_id = ? AND parent_id IS NULL", (user_id,))
     categories = cursor.fetchall()
@@ -43,12 +65,14 @@ async def start_transaction(message: Message, state: FSMContext):
     keyboard.append([KeyboardButton(text="❌ Отмена")])
 
     await message.answer(
-        "Выберите категорию:",
-        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+        f"💰 **Сумма: {amount:.2f} ₽**\n📝 **Описание: {description}**\n\nВыберите категорию:",
+        reply_markup=ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True),
+        parse_mode="Markdown"
     )
 
-# Шаг 2 — Выбор категории
-@router.message(ExpenseState.waiting_for_category)
+
+# ===== ШАГ 2 — ВЫБОР КАТЕГОРИИ =====
+@router.message(TransactionState.waiting_for_category)
 async def process_category_selection(message: Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.clear()
@@ -81,12 +105,12 @@ async def process_category_selection(message: Message, state: FSMContext):
         conn.commit()
         conn.close()
         await state.clear()
-        await message.answer("Расход сохранён.", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("✅ Расход сохранён.", reply_markup=types.ReplyKeyboardRemove())
         return
 
     # Есть подкатегории, переходим к следующему шагу
     await state.update_data(parent_id=parent_id)
-    await state.set_state(ExpenseState.waiting_for_subcategory)
+    await state.set_state(TransactionState.waiting_for_subcategory)
 
     keyboard = [[KeyboardButton(text=sub["name"])] for sub in subcategories]
     keyboard.append([KeyboardButton(text="❌ Отмена")])
@@ -97,8 +121,9 @@ async def process_category_selection(message: Message, state: FSMContext):
     )
     conn.close()
 
-# Шаг 3 — Выбор подкатегории
-@router.message(ExpenseState.waiting_for_subcategory)
+
+# ===== ШАГ 3 — ВЫБОР ПОДКАТЕГОРИИ =====
+@router.message(TransactionState.waiting_for_subcategory)
 async def process_subcategory_selection(message: Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.clear()
@@ -125,7 +150,8 @@ async def process_subcategory_selection(message: Message, state: FSMContext):
     conn.close()
 
     await state.clear()
-    await message.answer("Расход сохранён.", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("✅ Расход сохранён.", reply_markup=types.ReplyKeyboardRemove())
+
 
 def save_transaction(cursor, data, category_id):
     cursor.execute("""
