@@ -9,59 +9,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-# ===== ОТЧЁТ ЗА ДЕНЬ (кнопка И команда) =====
-@router.message(F.text == "📊 Отчёт за день")
-@router.message(Command("day"))
-async def report_day(message: Message):
-    logger.info(f"📊 Отчёт за день запрошен пользователем {message.from_user.id}")
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
-    user = cursor.fetchone()
-    if not user:
-        await message.answer("❌ Сначала нажмите /start")
-        conn.close()
-        return
-    user_id = user["id"]
-
-    today = datetime.now().date()
-
-    # Общая сумма за день
-    cursor.execute("""
-        SELECT SUM(amount) FROM transactions 
-        WHERE user_id = ? AND date(date) = date(?)
-    """, (user_id, today))
-    total = cursor.fetchone()[0] or 0.0
-
-    # Детализация по категориям за день
-    cursor.execute("""
-        SELECT c.name, SUM(t.amount) as sum
-        FROM transactions t
-        JOIN categories c ON t.category_id = c.id
-        WHERE t.user_id = ? AND date(t.date) = date(?)
-        GROUP BY c.name
-        ORDER BY sum DESC
-    """, (user_id, today))
-    categories = cursor.fetchall()
-
-    conn.close()
-
-    text = f"💰 **Расходы за сегодня: {total:.2f} ₽**\n\n"
-    
-    if categories:
-        text += "**По категориям:**\n"
-        for cat in categories:
-            percent = (cat["sum"] / total * 100) if total > 0 else 0
-            text += f"• {cat['name']}: {cat['sum']:.2f} ₽ ({percent:.1f}%)\n"
-    else:
-        text += "Нет расходов за сегодня."
-
-    await message.answer(text, parse_mode="Markdown")
-
-
-# ===== ОТЧЁТ ЗА МЕСЯЦ (кнопка И команда) =====
+# ===== ОТЧЁТ ЗА МЕСЯЦ =====
 @router.message(F.text == "📅 Отчёт за месяц")
 @router.message(Command("month", "report"))
 async def report_month(message: Message):
@@ -78,25 +26,21 @@ async def report_month(message: Message):
         return
     user_id = user["id"]
 
-    # Текущий месяц
     current_month = datetime.now().strftime("%Y-%m")
     last_month = (datetime.now() - timedelta(days=30)).strftime("%Y-%m")
 
-    # Общая сумма за текущий месяц
     cursor.execute("""
         SELECT SUM(amount) FROM transactions 
         WHERE user_id = ? AND strftime('%Y-%m', date) = ?
     """, (user_id, current_month))
     current_total = cursor.fetchone()[0] or 0.0
 
-    # Общая сумма за прошлый месяц
     cursor.execute("""
         SELECT SUM(amount) FROM transactions 
         WHERE user_id = ? AND strftime('%Y-%m', date) = ?
     """, (user_id, last_month))
     last_total = cursor.fetchone()[0] or 0.0
 
-    # Детализация по категориям за текущий месяц
     cursor.execute("""
         SELECT c.name, SUM(t.amount) as sum
         FROM transactions t
@@ -107,7 +51,6 @@ async def report_month(message: Message):
     """, (user_id, current_month))
     current_categories = cursor.fetchall()
 
-    # Детализация по категориям за прошлый месяц
     cursor.execute("""
         SELECT c.name, SUM(t.amount) as sum
         FROM transactions t
@@ -120,7 +63,6 @@ async def report_month(message: Message):
 
     conn.close()
 
-    # Считаем процент изменения
     if last_total > 0:
         change_percent = ((current_total - last_total) / last_total) * 100
         change_sign = "+" if change_percent > 0 else ""
@@ -137,7 +79,6 @@ async def report_month(message: Message):
         for cat in current_categories:
             percent = (cat["sum"] / current_total * 100) if current_total > 0 else 0
             
-            # Сравниваем с прошлым месяцем
             last_cat_sum = last_categories.get(cat["name"], 0)
             if last_cat_sum > 0:
                 cat_change = ((cat["sum"] - last_cat_sum) / last_cat_sum) * 100
@@ -153,7 +94,7 @@ async def report_month(message: Message):
     await message.answer(text, parse_mode="Markdown")
 
 
-# ===== ОСТАТОК БЮДЖЕТА (кнопка И команда) =====
+# ===== ОСТАТОК БЮДЖЕТА =====
 @router.message(F.text == "💰 Остаток бюджета")
 @router.message(Command("budget_status", "remaining"))
 async def budget_remaining(message: Message):
@@ -172,7 +113,6 @@ async def budget_remaining(message: Message):
 
     current_month = datetime.now().strftime("%Y-%m")
 
-    # Получаем все бюджеты пользователя
     cursor.execute("""
         SELECT b.category_id, b.monthly_limit, c.name,
                COALESCE(SUM(t.amount), 0) as spent
@@ -206,7 +146,6 @@ async def budget_remaining(message: Message):
         text += f"  Потрачено: {b['spent']:.2f} / {b['monthly_limit']:.2f} ₽\n"
         text += f"  Остаток: {remaining:.2f} ₽ ({100 - percent_spent:.1f}%)\n\n"
 
-        # Проверка на превышение лимита
         if percent_spent >= 100:
             alerts.append(f"🚨 **{b['name']}**: Бюджет превышен на {b['spent'] - b['monthly_limit']:.2f} ₽!")
         elif percent_spent >= 90:
@@ -228,17 +167,12 @@ async def cmd_help(message: Message):
 Просто напишите: `150 кофе` или `500 продукты`
 
 📈 **Отчёты:**
-/day - Отчёт за сегодня
 /month или /report - Отчёт за месяц
 /budget_status - Проверка бюджетов
 
 ⚙️ **Настройки:**
 /budget - Установить бюджет на категорию
-/last - Последние транзакции
-/find - Поиск по транзакциям
-/edit - Редактировать транзакцию
-/delete - Удалить транзакцию
-
+/addcategories - Добавить новые подкатегории
 /help - Эта справка
 """
     await message.answer(help_text, parse_mode="Markdown")
