@@ -5,7 +5,7 @@ from database.db import get_connection
 
 router = Router()
 
-# ✅ ТВОЙ ПРАВИЛЬНЫЙ ID:
+# ✅ ТВОЙ ID:
 ADMIN_ID = 534808305
 
 
@@ -28,8 +28,11 @@ async def add_missing_categories(message: Message):
     user_id = user["id"]
     added = []
     
+    # Категории для добавления
     to_add = [
         ("Еда", "Кофе"),
+        ("Еда", "Сладости"),      # ← НОВАЯ
+        ("Еда", "Перекус"),        # ← НОВАЯ
         ("Развлечения", "ЧГК"),
         ("Развлечения", "Квизы")
     ]
