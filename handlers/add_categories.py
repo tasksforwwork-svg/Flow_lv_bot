@@ -31,8 +31,8 @@ async def add_missing_categories(message: Message):
     # Категории для добавления
     to_add = [
         ("Еда", "Кофе"),
-        ("Еда", "Сладости"),      # ← НОВАЯ
-        ("Еда", "Перекус"),        # ← НОВАЯ
+        ("Еда", "Сладости"),
+        ("Еда", "Перекус"),
         ("Развлечения", "ЧГК"),
         ("Развлечения", "Квизы")
     ]
@@ -72,3 +72,38 @@ async def add_missing_categories(message: Message):
 @router.message(Command("myid"))
 async def show_id(message: Message):
     await message.answer(f"Твой ID: {message.from_user.id}")
+
+
+@router.message(Command("removevocal"))
+async def remove_vocal(message: Message):
+    """Удалить категорию Вокал"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
+    user = cursor.fetchone()
+    
+    if not user:
+        await message.answer("❌ Пользователь не найден")
+        conn.close()
+        return
+    
+    user_id = user["id"]
+    
+    # Находим и удаляем категорию "Вокал"
+    cursor.execute(
+        "DELETE FROM categories WHERE name = 'Вокал' AND user_id = ? AND parent_id IS NULL",
+        (user_id,)
+    )
+    
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    
+    if deleted > 0:
+        await message.answer("✅ Категория **Вокал** удалена!\n\nТеперь отправь /start")
+    else:
+        await message.answer("⚠️ Категория **Вокал** не найдена")
