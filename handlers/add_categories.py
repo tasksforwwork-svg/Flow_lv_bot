@@ -12,10 +12,10 @@ ADMIN_ID = 534808305
 @router.message(Command("fixcategories"))
 async def fix_all_categories(message: Message):
     """
-    Универсальная команда для исправления всех категорий:
+    Исправление категорий:
     - Удаляет "Вокал"
-    - Добавляет подкатегории в "Еда"
-    - Создаёт "Мелочи" и добавляет подкатегории
+    - Создаёт "Мелочи"
+    - Добавляет подкатегории в "Еда": Сладости, Перекус
     """
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Доступ запрещён")
@@ -37,16 +37,25 @@ async def fix_all_categories(message: Message):
     removed = []
     
     # ===== 1. УДАЛЯЕМ "ВОКАЛ" =====
-    cursor.execute(
-        "DELETE FROM categories WHERE name = 'Вокал' AND user_id = ? AND parent_id IS NULL",
-        (user_id,)
-    )
-    if cursor.rowcount > 0:
-        removed.append("Вокал (категория)")
+    cursor.execute("""
+        SELECT id, name FROM categories 
+        WHERE user_id = ? AND parent_id IS NULL 
+        AND LOWER(name) LIKE '%вокал%'
+    """, (user_id,))
+    
+    vocal_cats = cursor.fetchall()
+    
+    if vocal_cats:
+        for cat in vocal_cats:
+            # Сначала удаляем подкатегории
+            cursor.execute("DELETE FROM categories WHERE parent_id = ?", (cat["id"],))
+            # Потом удаляем саму категорию
+            cursor.execute("DELETE FROM categories WHERE id = ?", (cat["id"],))
+            removed.append(f"❌ {cat['name']}")
+    else:
+        removed.append("⚠️ Вокал не найден")
     
     # ===== 2. ДОБАВЛЯЕМ ПОДКАТЕГОРИИ В "ЕДА" =====
-    food_subcats = ["Сладости", "Перекус"]
-    
     cursor.execute(
         "SELECT id FROM categories WHERE name = 'Еда' AND user_id = ? AND parent_id IS NULL",
         (user_id,)
@@ -54,22 +63,33 @@ async def fix_all_categories(message: Message):
     food_parent = cursor.fetchone()
     
     if food_parent:
-        for subcat in food_subcats:
+        # Сладости
+        cursor.execute(
+            "SELECT id FROM categories WHERE name = 'Сладости' AND parent_id = ? AND user_id = ?",
+            (food_parent["id"], user_id)
+        )
+        if not cursor.fetchone():
             cursor.execute(
-                "SELECT id FROM categories WHERE name = ? AND parent_id = ? AND user_id = ?",
-                (subcat, food_parent["id"], user_id)
+                "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, ?)",
+                (user_id, "Сладости", food_parent["id"])
             )
-            if not cursor.fetchone():
-                cursor.execute(
-                    "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, ?)",
-                    (user_id, subcat, food_parent["id"])
-                )
-                added.append(f"Еда → {subcat}")
+            added.append("✅ Еда → Сладости")
+        
+        # Перекус
+        cursor.execute(
+            "SELECT id FROM categories WHERE name = 'Перекус' AND parent_id = ? AND user_id = ?",
+            (food_parent["id"], user_id)
+        )
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, ?)",
+                (user_id, "Перекус", food_parent["id"])
+            )
+            added.append("✅ Еда → Перекус")
     else:
         removed.append("⚠️ Категория 'Еда' не найдена")
     
-    # ===== 3. СОЗДАЁМ "МЕЛОЧИ" И ДОБАВЛЯЕМ ПОДКАТЕГОРИИ =====
-    # Сначала создаём саму категорию "Мелочи"
+    # ===== 3. СОЗДАЁМ "МЕЛОЧИ" =====
     cursor.execute(
         "SELECT id FROM categories WHERE name = 'Мелочи' AND user_id = ? AND parent_id IS NULL",
         (user_id,)
@@ -81,43 +101,21 @@ async def fix_all_categories(message: Message):
             "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, NULL)",
             (user_id, "Мелочи")
         )
-        misc_parent_id = cursor.lastrowid
-        added.append("Мелочи (новая категория)")
+        added.append("✅ Создана категория: Мелочи")
     else:
-        misc_parent_id = misc_parent["id"]
-    
-    # Подкатегории для "Мелочи"
-    misc_subcats = ["Дом", "Канцелярия", "Прочее"]
-    
-    for subcat in misc_subcats:
-        cursor.execute(
-            "SELECT id FROM categories WHERE name = ? AND parent_id = ? AND user_id = ?",
-            (subcat, misc_parent_id, user_id)
-        )
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO categories (user_id, name, parent_id) VALUES (?, ?, ?)",
-                (user_id, subcat, misc_parent_id)
-            )
-            added.append(f"Мелочи → {subcat}")
+        added.append("⚠️ Мелочи уже существуют")
     
     conn.commit()
     conn.close()
     
-    # ===== ФОРМИРУЕМ ОТЧЁТ =====
-    text = "✅ **Обновление категорий завершено!**\n\n"
+    # ===== ОТЧЁТ =====
+    text = "🔧 **Обновление категорий завершено!**\n\n"
     
     if removed:
-        text += "**Удалено:**\n"
-        for item in removed:
-            text += f"• {item}\n"
-        text += "\n"
+        text += "**Удалено:**\n" + "\n".join(f"• {x}" for x in removed) + "\n\n"
     
     if added:
-        text += "**Добавлено:**\n"
-        for item in added:
-            text += f"• {item}\n"
-        text += "\n"
+        text += "**Добавлено:**\n" + "\n".join(f"• {x}" for x in added) + "\n\n"
     
     text += "🔄 **Теперь отправь /start для обновления меню!**"
     
@@ -127,3 +125,46 @@ async def fix_all_categories(message: Message):
 @router.message(Command("myid"))
 async def show_id(message: Message):
     await message.answer(f"Твой ID: {message.from_user.id}")
+
+
+@router.message(Command("listcategories"))
+async def list_categories(message: Message):
+    """Показать все категории для отладки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
+    user = cursor.fetchone()
+    
+    if not user:
+        await message.answer("❌ Пользователь не найден")
+        conn.close()
+        return
+    
+    user_id = user["id"]
+    
+    cursor.execute("SELECT id, name FROM categories WHERE user_id = ? AND parent_id IS NULL ORDER BY id", (user_id,))
+    parents = cursor.fetchall()
+    
+    text = "📂 **Все категории:**\n\n"
+    
+    for p in parents:
+        text += f"📁 **{p['name']}**\n"
+        
+        cursor.execute("SELECT name FROM categories WHERE parent_id = ? ORDER BY id", (p["id"],))
+        children = cursor.fetchall()
+        
+        for c in children:
+            text += f"  • {c['name']}\n"
+        
+        if not children:
+            text += f"  • (нет подкатегорий)\n"
+        
+        text += "\n"
+    
+    conn.close()
+    
+    await message.answer(text, parse_mode="Markdown")
