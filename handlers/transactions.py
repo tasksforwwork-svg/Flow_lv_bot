@@ -16,7 +16,6 @@ class TransactionState(StatesGroup):
     waiting_for_description = State()
 
 
-# ===== ШАГ 1 — ВВОД СУММЫ (гибкий парсинг) =====
 @router.message(F.text.regexp(r"^[\d]+([,.]\d+)?(\s+.+)?$"))
 async def start_transaction(message: Message, state: FSMContext):
     text = message.text.strip()
@@ -39,15 +38,25 @@ async def start_transaction(message: Message, state: FSMContext):
     conn = get_connection()
     cursor = conn.cursor()
 
+    # 🔥 ВАЖНО: Создаём пользователя, если нет
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)",
+        (message.from_user.id,)
+    )
+    conn.commit()
+    
+    # Получаем user_id
     cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,))
     user = cursor.fetchone()
 
     if not user:
-        await message.answer("❌ Сначала нажмите /start")
+        logger.error(f"Не удалось создать пользователя {message.from_user.id}")
+        await message.answer("❌ Ошибка создания пользователя. Попробуйте /start")
         conn.close()
         return
 
     user_id = user["id"]
+    logger.info(f"✅ User ID: {user_id}")
 
     # Сохраняем данные в состояние
     await state.update_data(
@@ -61,6 +70,10 @@ async def start_transaction(message: Message, state: FSMContext):
     categories = cursor.fetchall()
     conn.close()
 
+    if not categories:
+        await message.answer("❌ Категории не найдены. Отправьте /start")
+        return
+
     keyboard = [[KeyboardButton(text=cat["name"])] for cat in categories]
     keyboard.append([KeyboardButton(text="❌ Отмена")])
 
@@ -71,7 +84,6 @@ async def start_transaction(message: Message, state: FSMContext):
     )
 
 
-# ===== ШАГ 2 — ВЫБОР КАТЕГОРИИ =====
 @router.message(TransactionState.waiting_for_category)
 async def process_category_selection(message: Message, state: FSMContext):
     if message.text == "❌ Отмена":
@@ -122,7 +134,6 @@ async def process_category_selection(message: Message, state: FSMContext):
     conn.close()
 
 
-# ===== ШАГ 3 — ВЫБОР ПОДКАТЕГОРИИ =====
 @router.message(TransactionState.waiting_for_subcategory)
 async def process_subcategory_selection(message: Message, state: FSMContext):
     if message.text == "❌ Отмена":
